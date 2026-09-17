@@ -4,11 +4,12 @@ import json
 import jsonpath_rw
 import os
 import re
+import shutil
 import sys
 import yaml
 from collections import OrderedDict
 from beets import config, ui
-from beets.util import get_most_common_tags
+from beets.util import MoveOperation, get_most_common_tags, syspath
 from beets.plugins import BeetsPlugin
 from pathlib import Path
 
@@ -137,6 +138,16 @@ class OriginQuery(BeetsPlugin):
                             .format(key, pattern))
 
         self.register_listener('import_task_start', self.import_task_start)
+        # task.add() (called between these two events) creates the Album
+        # object from the chosen candidate's own MB data and, via
+        # Album.store(inherit=True), pushes every album-level field (media,
+        # year, label, catalognum, albumdisambig, genres, ...) back down to
+        # every item -- overwriting whatever we set at import_task_start.
+        # Re-apply origin data to both the album and its items here, after
+        # that clobbering has already happened, then force a real re-write
+        # so the correction actually reaches the files (manipulate_files
+        # already wrote the -- wrong -- first pass by this point).
+        self.register_listener('import_task_files', self.import_task_files)
         self.tasks = {}
 
         try:
@@ -264,23 +275,10 @@ class OriginQuery(BeetsPlugin):
             if tagged_value != origin_value:
                 conflict = task_info['conflict'] = True
 
-        if not conflict or self.use_origin_on_conflict:
-            # Update all item with origin metadata.
+        task_info['apply_origin'] = not conflict or self.use_origin_on_conflict
+        if task_info['apply_origin']:
+            self._apply_origin_values(tag_compare, task.items)
             for item in task.items:
-                for tag, entry in tag_compare.items():
-                    origin_value = entry['origin']
-                    if tag in ALWAYS_APPLY_FIELDS:
-                        # Only override the search phrase when origin data
-                        # actually supplies a value; otherwise leave the
-                        # tagged album/artist alone.
-                        if not origin_value:
-                            continue
-                    elif tag not in self.extra_tags:
-                        continue
-                    if tag == 'year' and origin_value:
-                        origin_value = int(origin_value) if origin_value.isdigit() else ''
-                    item[tag] = origin_value
-
                 # beets weighs media heavily, and will even prioritize a media match over an exact catalognum match.
                 # At the same time, media for uploaded music is often mislabeled (e.g., Enhanced CD and SACD are just
                 # grouped as CD). This does not make a good combination. As a workaround, lower the weight for media
@@ -293,3 +291,86 @@ class OriginQuery(BeetsPlugin):
         self.print_tags(task_info.get('tag_compare').items(), use_tagged)
         if conflict:
             self.warn("Origin data conflicts with tagged data.")
+
+
+    def _apply_origin_values(self, tag_compare, items):
+        for item in items:
+            for tag, entry in tag_compare.items():
+                origin_value = entry['origin']
+                if tag in ALWAYS_APPLY_FIELDS:
+                    # Only override the search phrase when origin data
+                    # actually supplies a value; otherwise leave the
+                    # tagged album/artist alone.
+                    if not origin_value:
+                        continue
+                elif tag not in self.extra_tags:
+                    continue
+                if tag == 'year' and origin_value:
+                    origin_value = int(origin_value) if origin_value.isdigit() else ''
+                item[tag] = origin_value
+
+
+    def import_task_files(self, task, session):
+        task_info = self.tasks.get(task)
+        if not task_info:
+            return
+
+        tag_compare = task_info.get('tag_compare')
+        if task_info.get('apply_origin') and tag_compare:
+            self._apply_origin_values(tag_compare, task.items)
+
+            album = getattr(task, 'album', None)
+            if album is not None:
+                # Only genuine album-level fields apply here (e.g. `artist`
+                # and `media` are item-only and would otherwise end up as
+                # stray flexible attributes on the album).
+                album_tag_compare = OrderedDict(
+                    (tag, entry) for tag, entry in tag_compare.items()
+                    if tag in album._fields
+                )
+                self._apply_origin_values(album_tag_compare, [album])
+                # inherit=True pushes these corrected album-level fields
+                # back down to every item's DB row (not just the in-memory
+                # object).
+                album.store()
+
+            # The destination path template can reference these corrected
+            # fields (e.g. $albumdisambig), but manipulate_files() already
+            # moved/copied each item to a path computed *before* this
+            # correction. Relocate to the now-correct destination -- this
+            # only touches our own already-copied output tree, never the
+            # original source files.
+            for item in task.items:
+                item.move(operation=MoveOperation.MOVE, with_album=False)
+                item.try_write()
+                item.store()
+            if album is not None:
+                album.move_art(operation=MoveOperation.MOVE)
+                album.store()
+
+        self._copy_origin_file(task, task_info)
+
+
+    def _copy_origin_file(self, task, task_info):
+        """Carry the source origin file through into the destination album
+        directory, for reference alongside the imported files."""
+        if task_info.get('missing_origin'):
+            return
+        origin_path = task_info.get('origin_path')
+        if not origin_path or not origin_path.exists():
+            return
+
+        album = getattr(task, 'album', None)
+        try:
+            if album is not None:
+                dest_dir = album.item_dir()
+            else:
+                dest_dir = os.path.dirname(task.items[0].path)
+        except (ValueError, AttributeError, IndexError):
+            return
+
+        dest = os.path.join(dest_dir, origin_path.name.encode('utf-8'))
+        try:
+            shutil.copyfile(str(origin_path), syspath(dest))
+        except OSError as exc:
+            self.warn('Could not copy origin file to destination: {0}'.format(exc))
