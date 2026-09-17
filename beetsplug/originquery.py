@@ -13,6 +13,8 @@ from beets.plugins import BeetsPlugin
 from pathlib import Path
 
 BEETS_TO_LABEL = OrderedDict([
+    ('album', 'Release name'),
+    ('artist', 'Artist'),
     ('media', 'Media'),
     ('year', 'Edition year'),
     ('country', 'Country'),
@@ -23,6 +25,11 @@ BEETS_TO_LABEL = OrderedDict([
 
 # Conflicts will be reported if any of these fields don't match.
 CONFLICT_FIELDS = ['catalognum', 'media']
+
+# These fields feed the primary MusicBrainz search phrase (release/artist),
+# rather than the optional extra_tags filters, so origin data overrides them
+# whenever present, regardless of the configured extra_tags.
+ALWAYS_APPLY_FIELDS = ['album', 'artist']
 
 
 def escape_braces(string):
@@ -242,7 +249,13 @@ class OriginQuery(BeetsPlugin):
             for item in task.items:
                 for tag, entry in tag_compare.items():
                     origin_value = entry['origin']
-                    if tag not in self.extra_tags:
+                    if tag in ALWAYS_APPLY_FIELDS:
+                        # Only override the search phrase when origin data
+                        # actually supplies a value; otherwise leave the
+                        # tagged album/artist alone.
+                        if not origin_value:
+                            continue
+                    elif tag not in self.extra_tags:
                         continue
                     if tag == 'year' and origin_value:
                         origin_value = int(origin_value) if origin_value.isdigit() else ''
