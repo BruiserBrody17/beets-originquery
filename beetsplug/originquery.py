@@ -21,15 +21,20 @@ BEETS_TO_LABEL = OrderedDict([
     ('label', 'Record label'),
     ('catalognum', 'Catalog number'),
     ('albumdisambig', 'Edition'),
+    ('genres', 'Genres'),
 ])
 
 # Conflicts will be reported if any of these fields don't match.
 CONFLICT_FIELDS = ['catalognum', 'media']
 
-# These fields feed the primary MusicBrainz search phrase (release/artist),
-# rather than the optional extra_tags filters, so origin data overrides them
-# whenever present, regardless of the configured extra_tags.
-ALWAYS_APPLY_FIELDS = ['album', 'artist']
+# These fields feed the primary MusicBrainz search phrase (release/artist) or
+# are otherwise never MusicBrainz search filters, so origin data overrides
+# them whenever present, regardless of the configured extra_tags.
+ALWAYS_APPLY_FIELDS = ['album', 'artist', 'genres']
+
+# Fields not computed by beets.util.get_most_common_tags; the plugin derives
+# their current "tagged" value itself instead.
+NON_LIKELY_FIELDS = ['genres']
 
 
 def escape_braces(string):
@@ -40,6 +45,13 @@ def normalize_catno(catno):
     return catno.upper().replace(' ', '').replace('-', '')
 
 
+def clean_genre_tag(tag):
+    # Tracker-style tag slugs use dots for multi-word tags (e.g.
+    # "classic.rock"); numeric-leading tokens like "1970s" are left alone.
+    tag = tag.replace('.', ' ')
+    return re.sub(r'\b[a-zA-Z]+\b', lambda m: m.group(0).capitalize(), tag)
+
+
 def sanitize_value(key, value):
     if key == 'media' and value == 'WEB':
         return 'Digital Media'
@@ -47,6 +59,9 @@ def sanitize_value(key, value):
         return re.split('[,/]', value)[0].strip()
     if key == 'year' and value == '0':
         return ''
+    if key == 'genres':
+        tags = [clean_genre_tag(t.strip()) for t in value.split(',') if t.strip()]
+        return '; '.join(tags)
     return value
 
 
@@ -221,9 +236,14 @@ class OriginQuery(BeetsPlugin):
         likelies = get_most_common_tags(task.items)
         task_info['tag_compare'] = tag_compare = OrderedDict()
         for tag in BEETS_TO_LABEL:
+            if tag in NON_LIKELY_FIELDS:
+                current = (task.items[0].get(tag) if task.items else None) or []
+                tagged = '; '.join(current) if isinstance(current, list) else str(current)
+            else:
+                tagged = str(likelies[tag])
             tag_compare.update({tag: {
-                'tagged': str(likelies[tag]),
-                'active': tag in self.extra_tags,
+                'tagged': tagged,
+                'active': tag in self.extra_tags or tag in ALWAYS_APPLY_FIELDS,
                 'origin': '',
             }})
 
