@@ -147,6 +147,16 @@ class OriginQuery(BeetsPlugin):
         # before_choose_candidate, which fires synchronously right as this
         # task's own prompt is being built.
         self.register_listener('before_choose_candidate', self.before_choose_candidate)
+        # import_task_apply fires synchronously right after the user picks
+        # Apply, inside the same blocking call that handled that album's
+        # prompt (apply_metadata() has just run, so item.media/albumdisambig
+        # hold MusicBrainz's own values) -- and, critically, before the
+        # pipeline can move on to the next album's prompt. import_task_files
+        # fires later, from a separately-pipelined file-writing stage that
+        # can run concurrently with the NEXT album's prompt, which is too
+        # late for an interactive question: it was showing up interleaved
+        # with -- or after -- the next album's own prompt.
+        self.register_listener('import_task_apply', self.import_task_apply)
         # task.add() (called between these two events) creates the Album
         # object from the chosen candidate's own MB data and, via
         # Album.store(inherit=True), pushes every album-level field (media,
@@ -341,9 +351,9 @@ class OriginQuery(BeetsPlugin):
             return
 
         # MB's own resolved values are whatever is currently on the item:
-        # apply_metadata() has already run by this point, but our own
-        # origin overrides (applied right after this method returns)
-        # haven't landed yet.
+        # called from import_task_apply, right after apply_metadata() has
+        # populated items from the chosen candidate, but before our own
+        # origin overrides (which land later, in import_task_files).
         first_item = task.items[0]
         mb_media = str(first_item.get('media') or '').strip()
         mb_disambig = str(first_item.get('albumdisambig') or '').strip()
@@ -385,6 +395,14 @@ class OriginQuery(BeetsPlugin):
             item['version_choice'] = chosen
 
 
+    def import_task_apply(self, session, task):
+        task_info = self.tasks.get(task)
+        if not task_info:
+            return
+        tag_compare = task_info.get('tag_compare')
+        if task_info.get('apply_origin') and tag_compare:
+            self._resolve_version_choice(task, tag_compare)
+
     def import_task_files(self, task, session):
         task_info = self.tasks.get(task)
         if not task_info:
@@ -392,7 +410,6 @@ class OriginQuery(BeetsPlugin):
 
         tag_compare = task_info.get('tag_compare')
         if task_info.get('apply_origin') and tag_compare:
-            self._resolve_version_choice(task, tag_compare)
             self._apply_origin_values(tag_compare, task.items)
 
             album = getattr(task, 'album', None)
