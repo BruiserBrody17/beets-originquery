@@ -138,6 +138,15 @@ class OriginQuery(BeetsPlugin):
                             .format(key, pattern))
 
         self.register_listener('import_task_start', self.import_task_start)
+        # import_task_start fires early in beets' pipeline, which searches
+        # several albums ahead of whichever one the user is actually being
+        # prompted for -- printing the origin-data table there means it
+        # shows up for releases well before you review them. Do the actual
+        # data work (below) in import_task_start, since it must land before
+        # the MusicBrainz search happens, but defer the printing to
+        # before_choose_candidate, which fires synchronously right as this
+        # task's own prompt is being built.
+        self.register_listener('before_choose_candidate', self.before_choose_candidate)
         # task.add() (called between these two events) creates the Album
         # object from the chosen candidate's own MB data and, via
         # Album.store(inherit=True), pushes every album-level field (media,
@@ -286,7 +295,12 @@ class OriginQuery(BeetsPlugin):
                 if item['media'] and item['catalognum']:
                     config['match']['distance_weights']['media'] = .2
 
-        self.info('Using origin file {0}'.format(origin_path))
+    def before_choose_candidate(self, session, task):
+        task_info = self.tasks.get(task)
+        if not task_info or task_info.get('missing_origin'):
+            return
+        self.info('Using origin file {0}'.format(task_info['origin_path']))
+        conflict = task_info.get('conflict')
         use_tagged = conflict and not self.use_origin_on_conflict
         self.print_tags(task_info.get('tag_compare').items(), use_tagged)
         if conflict:
