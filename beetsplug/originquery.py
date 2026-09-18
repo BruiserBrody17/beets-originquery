@@ -340,6 +340,20 @@ class OriginQuery(BeetsPlugin):
             # correction. Relocate to the now-correct destination -- this
             # only touches our own already-copied output tree, never the
             # original source files.
+            #
+            # %aunique{}/%sunique{} memoize their result per album/item id
+            # (not per field value) in lib._memotable, populated by the
+            # first path computation manipulate_files() already did using
+            # the *pre-correction* field values. Recomputing the path now,
+            # after correcting those fields, would silently reuse that
+            # stale memo (e.g. "no collision" computed against the raw MB
+            # title, even though the origin-corrected title does collide
+            # with another album) unless the cache is invalidated first --
+            # same as what Library.add() itself does whenever the album
+            # set changes.
+            db = getattr(task.items[0], '_db', None) if task.items else None
+            if db is not None:
+                db._memotable = {}
             for item in task.items:
                 item.move(operation=MoveOperation.MOVE, with_album=False)
                 item.try_write()
