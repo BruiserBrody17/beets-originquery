@@ -310,6 +310,67 @@ class OriginQuery(BeetsPlugin):
                 item[tag] = origin_value
 
 
+    def _resolve_version_choice(self, task, tag_compare):
+        """If origin data and MusicBrainz disagree on media/albumdisambig
+        enough to produce a different VERSION tag (see roon_artwork's
+        "{media} | {albumdisambig}" composition), ask which source should
+        win for VERSION specifically -- this doesn't affect the media/
+        albumdisambig fields used everywhere else (path, other tags),
+        which keep the existing origin-preferred-with-MB-fallback rule.
+        Stores the chosen string as the 'version_choice' flexible
+        attribute, which roon_artwork's VERSION tag writer prefers over
+        its own composition when present.
+        """
+        media_entry = tag_compare.get('media')
+        disambig_entry = tag_compare.get('albumdisambig')
+        if not media_entry or not disambig_entry or not task.items:
+            return
+
+        # MB's own resolved values are whatever is currently on the item:
+        # apply_metadata() has already run by this point, but our own
+        # origin overrides (applied right after this method returns)
+        # haven't landed yet.
+        first_item = task.items[0]
+        mb_media = str(first_item.get('media') or '').strip()
+        mb_disambig = str(first_item.get('albumdisambig') or '').strip()
+        origin_media = media_entry.get('origin', '')
+        origin_disambig = disambig_entry.get('origin', '')
+
+        if not (origin_media or origin_disambig):
+            return  # nothing from origin to compare against
+
+        def compose(media, disambig):
+            # Collapse to one side when media and albumdisambig are the
+            # same value (e.g. "SACD | SACD") -- mirrors roon_artwork's
+            # compose_version(), which the stored choice ultimately feeds.
+            media = (media or '').strip()
+            disambig = (disambig or '').strip()
+            if media and disambig and media.lower() == disambig.lower():
+                return media
+            return ' | '.join(p for p in (media, disambig) if p)
+
+        mb_version = compose(mb_media, mb_disambig)
+        origin_version = compose(origin_media, origin_disambig)
+
+        if not mb_version or not origin_version or mb_version == origin_version:
+            return  # nothing meaningful to choose between
+
+        if config['import']['quiet'].get(bool):
+            return  # can't prompt; VERSION falls back to its normal
+            # origin-preferred composition
+
+        self.info('VERSION tag differs by source:')
+        self.info('  MusicBrainz: {0}'.format(mb_version))
+        self.info('  Origin file: {0}'.format(origin_version))
+        try:
+            choice = ui.input_options(('Musicbrainz', 'Origin'), default='o')
+        except Exception:
+            return
+        chosen = mb_version if choice == 'm' else origin_version
+        for item in task.items:
+            item['version_choice'] = chosen
+
+
     def import_task_files(self, task, session):
         task_info = self.tasks.get(task)
         if not task_info:
@@ -317,6 +378,7 @@ class OriginQuery(BeetsPlugin):
 
         tag_compare = task_info.get('tag_compare')
         if task_info.get('apply_origin') and tag_compare:
+            self._resolve_version_choice(task, tag_compare)
             self._apply_origin_values(tag_compare, task.items)
 
             album = getattr(task, 'album', None)
