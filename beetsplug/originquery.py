@@ -174,6 +174,15 @@ class OriginQuery(BeetsPlugin):
         # tracked. Carry it along whenever an already-imported album
         # gets moved later.
         self.register_listener('item_moved', self.item_moved)
+        # Keep a handle on our own wrapped listener so import_task_files can
+        # briefly unregister it around its own item.move() call below --
+        # beets' plugin dispatch wrapper asserts a plugin's logger is at
+        # NOTSET on entry, which a same-instance reentrant event (our own
+        # import_task_files, still on the stack, calling item.move(), which
+        # fires item_moved right back into this same plugin instance)
+        # violates, crashing the import. This has no effect on genuine
+        # standalone beet move/modify -m calls, which don't nest this way.
+        self._item_moved_listener = self.listeners['item_moved'][-1]
         self.tasks = {}
 
         try:
@@ -454,10 +463,18 @@ class OriginQuery(BeetsPlugin):
             db = getattr(task.items[0], '_db', None) if task.items else None
             if db is not None:
                 db._memotable = {}
-            for item in task.items:
-                item.move(operation=MoveOperation.MOVE, with_album=False)
-                item.try_write()
-                item.store()
+            item_moved_listeners = self.listeners['item_moved']
+            had_listener = self._item_moved_listener in item_moved_listeners
+            if had_listener:
+                item_moved_listeners.remove(self._item_moved_listener)
+            try:
+                for item in task.items:
+                    item.move(operation=MoveOperation.MOVE, with_album=False)
+                    item.try_write()
+                    item.store()
+            finally:
+                if had_listener:
+                    item_moved_listeners.append(self._item_moved_listener)
             if album is not None:
                 album.move_art(operation=MoveOperation.MOVE)
                 album.store()
