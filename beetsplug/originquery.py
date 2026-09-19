@@ -538,11 +538,25 @@ class OriginQuery(BeetsPlugin):
             # (needed for the other extra_tags fields, to survive
             # Album.store(inherit=True) clobbering them) stomp that choice
             # back to origin's value.
-            skip_fields = (
-                ('artist', 'album')
-                if task_info.get('artist_album_resolved')
-                else ()
-            )
+            #
+            # media always gets skipped here, unconditionally -- it's the
+            # one extra_tags field beets models as item-only with no album-
+            # level equivalent (like artist/albumartist before the fix
+            # above), so a multi-medium release (e.g. a hybrid SACD with a
+            # CD-layer bonus disc, same shape as this session's Fleetwood
+            # Mac/Downward Spiral imports) can have genuinely different
+            # media per disc. Unlike artist, this reapplication was never
+            # even needed: media never lands on the Album object (see the
+            # album_tag_compare filter below), so Album.store(inherit=True)
+            # never clobbers it -- there's nothing here to survive. Origin's
+            # media value still does its job pre-match, shaping the search
+            # in import_task_start; apply_metadata() then sets each item's
+            # real per-disc media from the chosen candidate once matched,
+            # which this reapplication was overwriting right back to
+            # origin's single flat value for every item.
+            skip_fields = ('media',)
+            if task_info.get('artist_album_resolved'):
+                skip_fields += ('artist', 'album')
             self._apply_origin_values(tag_compare, task.items, skip_fields=skip_fields)
 
             album = getattr(task, 'album', None)
