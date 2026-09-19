@@ -451,9 +451,21 @@ class OriginQuery(BeetsPlugin):
             choice = ui.input_options(('Musicbrainz', 'Origin'), default='o')
         except Exception:
             return
-        chosen = mb_version if choice == 'm' else origin_version
+        if choice == 'm':
+            # Don't stamp mb_version (composed from just the first item's
+            # own media/albumdisambig) onto every item -- on a
+            # multi-medium release those can legitimately differ per disc
+            # (the exact Fleetwood Mac/Downward Spiral shape from this
+            # session). "Prefer MusicBrainz" already means each item's own
+            # per-item media/albumdisambig, which roon_artwork's
+            # write_version_tag falls through to naturally when no
+            # version_choice override is set -- so leave it unset.
+            return
+        # Origin only ever has one flat value for the whole release (no
+        # per-disc granularity to lose), so applying it uniformly here is
+        # correct, not the same mistake.
         for item in task.items:
-            item['version_choice'] = chosen
+            item['version_choice'] = origin_version
 
 
     def _resolve_artist_album_choice(self, task, tag_compare):
