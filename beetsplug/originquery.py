@@ -33,6 +33,38 @@ CONFLICT_FIELDS = ['catalognum', 'media']
 # them whenever present, regardless of the configured extra_tags.
 ALWAYS_APPLY_FIELDS = ['album', 'artist', 'genres']
 
+
+def _configured_perm(kind):
+    """Mirror beets' own permissions plugin config (permissions.file/dir).
+    origin.yaml isn't a file beets tracks as a library item, so the
+    permissions plugin's own item_imported/album_imported hooks never see
+    it -- it only ever gets whatever the process's ambient umask leaves
+    it with. Explicitly matching the same config keeps it consistent with
+    every other file in the album directory.
+    """
+    try:
+        raw = config['permissions'][kind].get()
+    except confuse.NotFoundError:
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        raw = str(raw)
+    try:
+        return int(raw, 8)
+    except (TypeError, ValueError):
+        return None
+
+
+def _chmod_if_configured(path, kind):
+    perm = _configured_perm(kind)
+    if perm is None:
+        return
+    try:
+        os.chmod(path, perm)
+    except OSError:
+        pass
+
 # Fields not computed by beets.util.get_most_common_tags; the plugin derives
 # their current "tagged" value itself instead.
 NON_LIKELY_FIELDS = ['genres']
@@ -572,6 +604,8 @@ class OriginQuery(BeetsPlugin):
             shutil.copyfile(str(origin_path), syspath(dest))
         except OSError as exc:
             self.warn('Could not copy origin file to destination: {0}'.format(exc))
+            return
+        _chmod_if_configured(syspath(dest), 'file')
 
     def item_moved(self, item, source, destination):
         source_dir = os.path.dirname(source).decode('utf8')
@@ -590,3 +624,5 @@ class OriginQuery(BeetsPlugin):
             shutil.move(origin_path, dest_path)
         except OSError as exc:
             self.warn('Could not carry origin file to new location: {0}'.format(exc))
+            return
+        _chmod_if_configured(dest_path, 'file')
