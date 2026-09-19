@@ -57,14 +57,25 @@ def _configured_perm(kind):
         return None
 
 
-def _chmod_if_configured(path, kind):
+def _chmod_if_configured(path, kind, log=None):
     perm = _configured_perm(kind)
     if perm is None:
         return
     try:
         os.chmod(path, perm)
-    except OSError:
-        pass
+    except OSError as exc:
+        # Most likely cause: this file is owned by a different PUID/PGID
+        # than the one currently running (e.g. an env var changed between
+        # when this file was created and now) -- only the owner or root
+        # can chmod, so this silently fails otherwise. Failing loudly
+        # here at least makes that diagnosable instead of leaving some
+        # files inexplicably at the wrong permissions.
+        if log is not None:
+            log.warning(
+                'originquery: could not chmod {} to {}: {}'.format(
+                    path, oct(perm), exc
+                )
+            )
 
 # Fields not computed by beets.util.get_most_common_tags; the plugin derives
 # their current "tagged" value itself instead.
@@ -687,7 +698,7 @@ class OriginQuery(BeetsPlugin):
         except OSError as exc:
             self.warn('Could not copy origin file to destination: {0}'.format(exc))
             return
-        _chmod_if_configured(syspath(dest), 'file')
+        _chmod_if_configured(syspath(dest), 'file', log=self._log)
 
     def item_moved(self, item, source, destination):
         source_dir = os.path.dirname(source).decode('utf8')
@@ -707,4 +718,4 @@ class OriginQuery(BeetsPlugin):
         except OSError as exc:
             self.warn('Could not carry origin file to new location: {0}'.format(exc))
             return
-        _chmod_if_configured(dest_path, 'file')
+        _chmod_if_configured(dest_path, 'file', log=self._log)
