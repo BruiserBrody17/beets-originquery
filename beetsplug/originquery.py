@@ -333,9 +333,11 @@ class OriginQuery(BeetsPlugin):
             self.warn("Origin data conflicts with tagged data.")
 
 
-    def _apply_origin_values(self, tag_compare, items):
+    def _apply_origin_values(self, tag_compare, items, skip_fields=()):
         for item in items:
             for tag, entry in tag_compare.items():
+                if tag in skip_fields:
+                    continue
                 origin_value = entry['origin']
                 if tag in ALWAYS_APPLY_FIELDS:
                     # Only override the search phrase when origin data
@@ -411,6 +413,60 @@ class OriginQuery(BeetsPlugin):
             item['version_choice'] = chosen
 
 
+    def _resolve_artist_album_choice(self, task, tag_compare):
+        """artist/album are in ALWAYS_APPLY_FIELDS so origin data can clean
+        up polluted search phrases (e.g. a scene-release folder name stuffed
+        into the album tag) *before* the MusicBrainz search runs. But
+        blindly reapplying origin's raw value again *after* a match has
+        been chosen defeats a deliberate choice like a translated/
+        transliterated pseudo-release -- origin data is often just the
+        source release's own (un-translated) credit, so it would silently
+        overwrite a proper translation the user specifically picked. Ask
+        instead, same pattern as _resolve_version_choice, and only when
+        they actually differ. Applies the choice directly to item['artist']
+        /item['album'] (unlike VERSION, there's no downstream composition
+        that needs a separate flex attribute).
+        """
+        album_entry = tag_compare.get('album')
+        artist_entry = tag_compare.get('artist')
+        if not album_entry or not artist_entry or not task.items:
+            return
+
+        first_item = task.items[0]
+        mb_artist = str(first_item.get('artist') or '').strip()
+        mb_album = str(first_item.get('album') or '').strip()
+        origin_artist = artist_entry.get('origin', '')
+        origin_album = album_entry.get('origin', '')
+
+        if not (origin_artist or origin_album):
+            return  # nothing from origin to compare against
+
+        if (
+            mb_artist.lower() == origin_artist.strip().lower()
+            and mb_album.lower() == origin_album.strip().lower()
+        ):
+            return  # nothing meaningful to choose between
+
+        if config['import']['quiet'].get(bool):
+            return  # can't prompt; falls through to the normal
+            # origin-always-wins behavior below
+
+        self.info('Artist/Album differ by source:')
+        self.info('  MusicBrainz: {0} - {1}'.format(mb_artist, mb_album))
+        self.info('  Origin file: {0} - {1}'.format(origin_artist, origin_album))
+        try:
+            choice = ui.input_options(('Musicbrainz', 'Origin'), default='o')
+        except Exception:
+            return
+        if choice == 'm':
+            for item in task.items:
+                item['artist'] = mb_artist
+                item['album'] = mb_album
+            task_info = self.tasks.get(task)
+            if task_info is not None:
+                task_info['artist_album_resolved'] = True
+
+
     def import_task_apply(self, session, task):
         task_info = self.tasks.get(task)
         if not task_info:
@@ -418,6 +474,7 @@ class OriginQuery(BeetsPlugin):
         tag_compare = task_info.get('tag_compare')
         if task_info.get('apply_origin') and tag_compare:
             self._resolve_version_choice(task, tag_compare)
+            self._resolve_artist_album_choice(task, tag_compare)
 
     def import_task_files(self, task, session):
         task_info = self.tasks.get(task)
@@ -426,7 +483,17 @@ class OriginQuery(BeetsPlugin):
 
         tag_compare = task_info.get('tag_compare')
         if task_info.get('apply_origin') and tag_compare:
-            self._apply_origin_values(tag_compare, task.items)
+            # If the user picked MusicBrainz's own artist/album at the
+            # import_task_apply prompt above, don't let this reapplication
+            # (needed for the other extra_tags fields, to survive
+            # Album.store(inherit=True) clobbering them) stomp that choice
+            # back to origin's value.
+            skip_fields = (
+                ('artist', 'album')
+                if task_info.get('artist_album_resolved')
+                else ()
+            )
+            self._apply_origin_values(tag_compare, task.items, skip_fields=skip_fields)
 
             album = getattr(task, 'album', None)
             if album is not None:
@@ -437,7 +504,7 @@ class OriginQuery(BeetsPlugin):
                     (tag, entry) for tag, entry in tag_compare.items()
                     if tag in album._fields
                 )
-                self._apply_origin_values(album_tag_compare, [album])
+                self._apply_origin_values(album_tag_compare, [album], skip_fields=skip_fields)
                 # inherit=True pushes these corrected album-level fields
                 # back down to every item's DB row (not just the in-memory
                 # object).
