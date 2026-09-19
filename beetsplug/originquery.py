@@ -394,14 +394,20 @@ class OriginQuery(BeetsPlugin):
             for tag, entry in tag_compare.items():
                 if tag in skip_fields:
                     continue
+                if tag not in ALWAYS_APPLY_FIELDS and tag not in self.extra_tags:
+                    continue
                 origin_value = entry['origin']
-                if tag in ALWAYS_APPLY_FIELDS:
-                    # Only override the search phrase when origin data
-                    # actually supplies a value; otherwise leave the
-                    # tagged album/artist alone.
-                    if not origin_value:
-                        continue
-                elif tag not in self.extra_tags:
+                # Never overwrite with nothing -- origin.yaml not
+                # supplying a value for this tag (either because it
+                # genuinely has none for this album, or, as with `country`
+                # by default, because it's listed in musicbrainz.extra_tags
+                # without a matching originquery.tag_patterns entry at
+                # all) must leave whatever MusicBrainz already set alone,
+                # not blank it out. This used to only guard
+                # ALWAYS_APPLY_FIELDS; extra_tags-driven fields had no such
+                # guard, so any configured-but-unmapped extra_tags field
+                # got silently wiped to '' on every single import.
+                if not origin_value:
                     continue
                 if tag == 'year' and origin_value:
                     origin_value = int(origin_value) if origin_value.isdigit() else ''
