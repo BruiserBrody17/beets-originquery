@@ -381,7 +381,18 @@ class OriginQuery(BeetsPlugin):
                     continue
                 if tag == 'year' and origin_value:
                     origin_value = int(origin_value) if origin_value.isdigit() else ''
-                item[tag] = origin_value
+                # origin.yaml's Artist field describes the release as a
+                # whole, not any individual track -- write it to
+                # albumartist, never the per-track artist field. Tracks on
+                # a various-artists compilation/soundtrack can have
+                # genuinely different artists (get_most_common_tags()
+                # already promotes albumartist consensus into the search
+                # query's artist field on its own, and beets' own
+                # va_likely detection depends on per-track artist values
+                # actually differing) -- overwriting every item's artist
+                # uniformly broke both.
+                target_tag = 'albumartist' if tag == 'artist' else tag
+                item[target_tag] = origin_value
 
 
     def _resolve_version_choice(self, task, tag_compare):
@@ -455,9 +466,11 @@ class OriginQuery(BeetsPlugin):
         source release's own (un-translated) credit, so it would silently
         overwrite a proper translation the user specifically picked. Ask
         instead, same pattern as _resolve_version_choice, and only when
-        they actually differ. Applies the choice directly to item['artist']
-        /item['album'] (unlike VERSION, there's no downstream composition
-        that needs a separate flex attribute).
+        they actually differ. Applies the choice to item['albumartist']
+        /item['album'] -- never the per-track item['artist'], which can
+        (and on a various-artists compilation/soundtrack, legitimately
+        does) differ from track to track; origin.yaml's single Artist
+        field describes the release as a whole, not any one track.
         """
         album_entry = tag_compare.get('album')
         artist_entry = tag_compare.get('artist')
@@ -465,7 +478,7 @@ class OriginQuery(BeetsPlugin):
             return
 
         first_item = task.items[0]
-        mb_artist = str(first_item.get('artist') or '').strip()
+        mb_artist = str(first_item.get('albumartist') or '').strip()
         mb_album = str(first_item.get('album') or '').strip()
         origin_artist = artist_entry.get('origin', '')
         origin_album = album_entry.get('origin', '')
@@ -491,8 +504,13 @@ class OriginQuery(BeetsPlugin):
         except Exception:
             return
         if choice == 'm':
+            # task.album doesn't exist yet -- this runs from
+            # import_task_apply, before task.add(). Setting albumartist
+            # uniformly on every item here is sufficient: task.add()'s
+            # align_album_level_fields() reads items[0].albumartist to
+            # build the Album object, so it picks this up automatically.
             for item in task.items:
-                item['artist'] = mb_artist
+                item['albumartist'] = mb_artist
                 item['album'] = mb_album
             task_info = self.tasks.get(task)
             if task_info is not None:
@@ -529,12 +547,20 @@ class OriginQuery(BeetsPlugin):
 
             album = getattr(task, 'album', None)
             if album is not None:
-                # Only genuine album-level fields apply here (e.g. `artist`
-                # and `media` are item-only and would otherwise end up as
-                # stray flexible attributes on the album).
+                # Only genuine album-level fields apply here (e.g. `media`
+                # is item-only and would otherwise end up as a stray
+                # flexible attribute on the album). `artist` isn't a real
+                # album field either -- check its redirect target
+                # (albumartist, see _apply_origin_values) instead, or this
+                # entry gets silently dropped here and album.albumartist
+                # never gets corrected, even though every item's already
+                # was. album.store() below inherits album fields back down
+                # to every item, so that stale, uncorrected albumartist
+                # would then overwrite the correct per-item value that was
+                # just set.
                 album_tag_compare = OrderedDict(
                     (tag, entry) for tag, entry in tag_compare.items()
-                    if tag in album._fields
+                    if ('albumartist' if tag == 'artist' else tag) in album._fields
                 )
                 self._apply_origin_values(album_tag_compare, [album], skip_fields=skip_fields)
                 # inherit=True pushes these corrected album-level fields
