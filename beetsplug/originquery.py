@@ -695,6 +695,13 @@ class OriginQuery(BeetsPlugin):
         dest = os.path.join(dest_dir, origin_path.name.encode('utf-8'))
         try:
             shutil.copyfile(str(origin_path), syspath(dest))
+        except shutil.SameFileError:
+            # beet import -L retags items already in the library -- the
+            # origin file's source and destination can then be the exact
+            # same file (already correctly in place, nothing to copy),
+            # unlike a normal import where the source is always a
+            # separate /music/incoming directory. Not worth a warning.
+            pass
         except OSError as exc:
             self.warn('Could not copy origin file to destination: {0}'.format(exc))
             return
